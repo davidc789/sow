@@ -765,7 +765,7 @@ def visualise_grid(
     return fig, ax
 
 
-def avalanche_loss(topple_occurrence: list[bool], topple_loss: list[float]):
+def avalanche_statistics(topple_occurrence: list[bool], topple_loss: list[float]):
     """ Computes the amount of sand lost in an avalanche.
 
     :param topple_occurrence: Flags for when topple occurred.
@@ -773,22 +773,26 @@ def avalanche_loss(topple_occurrence: list[bool], topple_loss: list[float]):
     """
     t = 0
     loss = []
+    duration = []
 
     while t < len(topple_occurrence):
         current_loss = 0
+        current_duration = 0
 
         # Advance to the first point toppling start to occur.
-        while t < len(topple_occurrence) and not topple_occurrence:
+        while t < len(topple_occurrence) and not topple_occurrence[t]:
             t += 1
 
         # Sum all the loss for the toppling entries.
-        while t < len(topple_occurrence) and topple_occurrence:
+        while t < len(topple_occurrence) and topple_occurrence[t]:
             current_loss += topple_loss[t]
             t += 1
+            current_duration += 1
 
         loss.append(current_loss)
+        duration.append(current_duration)
 
-    return loss
+    return duration, loss
 
 
 if __name__ == "__main__":
