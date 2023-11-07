@@ -2,3 +2,4 @@ igraph
 numpy
 matplotlib
 moviepy
+statsmodels
