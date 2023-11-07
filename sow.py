@@ -6,7 +6,8 @@
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
-from typing import Optional, Any
+from pathlib import Path
+from typing import Optional, Any, Callable, Literal, TypeVar, Generic
 
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -17,6 +18,8 @@ import igraph as ig
 from moviepy.editor import VideoClip
 from moviepy.video.io.bindings import mplfig_to_npimage
 from collections import deque
+
+T = TypeVar("T")
 
 
 @dataclass
@@ -35,8 +38,66 @@ class SimulationStartContext(SimulationContext):
 @dataclass
 class SimulationStepContext(SimulationContext):
     """ Context to the current step of simulation. """
-    i: int            # The index of the cell selected.
+    vertex: int            # The index of the cell selected.
     is_topple: bool   # Whether the step is considered a topple step.
+
+
+# Type alias for the subsequent family of functions.
+ContextTransformerType = Callable[[SimulationContext], T]
+
+
+class ContextTransformer(object):
+    """ A static class holding context-transforming utilities.
+
+    All the functions receive a context (maybe a specific type) and outputs
+    some results that can be used in the listeners.
+    """
+    @staticmethod
+    def visualise_graph(context: SimulationContext):
+        """ Visualise the simulation as a graph.
+
+        :param context: The simulation context.
+        :return: Matplotlib figure and axes.
+        """
+        return visualise_graph(
+            context.model.original_graph, context.model.height,
+            max_height=context.model.topple_limit)
+
+    @staticmethod
+    def mean_height(context: SimulationContext):
+        """ Computes the mean height of the graph sand pile.
+
+        :param context: The simulation context.
+        :return: The mean height.
+        """
+        return np.mean(context.model.height)
+
+    @staticmethod
+    def topple_occurrence(context: SimulationContext):
+        """ Tracks when the sand pile topples.
+
+        :param context: The simulation context.
+        :return: The topple frequency.
+        """
+        if isinstance(context, SimulationStepContext):
+            return context.is_topple
+        else:
+            return np.nan
+
+    @staticmethod
+    def topple_loss(context: SimulationContext):
+        """ Gives the number of sand lost due to toppling over the boundary.
+
+        :param context: The simulation context.
+        :return: Number of sand lost during toppling.
+        """
+        if isinstance(context, SimulationStepContext) and context.is_topple:
+            if context.vertex in context.model.boundary_vertices:
+                return context.model.boundary_vertices[context.vertex]
+            else:
+                return 0
+        else:
+            return np.nan
 
 
 class SimulationListener(ABC):
@@ -160,7 +221,7 @@ class RandomDropper(SimulationManager):
         # Prepares a sequence of random numbers in advance to leverage the
         # power of vectorisation.
         self._all_u = np.random.randint(
-            0, context.model.graph.vcount() - 1, context.t_lim)
+            0, context.model.original_graph.vcount(), context.t_lim)
 
     def onSimulationEnd(self, context: SimulationContext):
         # Clean up the reference to the cached random integers.
@@ -212,7 +273,60 @@ class SimulationHistoryRecorder(SimulationListener):
             self._records.append(self.record_history(context))
 
 
-class SimulationMovieMaker(SimulationListener):
+class ImageMaker(SimulationListener):
+    """ Makes a series of images from the simulation. """
+    # Type aliases.
+    Visualiser = ContextTransformerType[tuple[Figure, Axes]]
+
+    # Final variables fixed after initialisation.
+    out_dir: Path | None = None
+    save_only: bool
+    ext: str
+    visualiser: Visualiser
+
+    # Internal states.
+    images: list[tuple[Figure, Axes]] | None = None
+
+    def __init__(self, out_dir: str | None = None, save_only: bool = False,
+                 ext: str = "jpg", visualiser: Visualiser | None = None):
+        """ Creates an image maker.
+
+        :param out_dir: Directory for output. If None the images will still
+        be tracked but no files will be saved.
+        :param save_only: Whether to not store the history of files. This
+        requires out_dir to be specified
+        :param ext: The filename extension for the images.
+        :param visualiser: A callback that generates the frames.
+        """
+        self.save_only = save_only
+
+        if out_dir is not None:
+            self.out_dir = Path(out_dir)
+
+        # Apply the default visualiser if unspecified.
+        if visualiser is None:
+            self.visualiser = ContextTransformer.visualise_graph
+        else:
+            self.visualiser = visualiser
+
+    def onSimulationStart(self, context: SimulationStartContext):
+        # Initialise internal states.
+        self.images = []
+
+    def onSimulationEnd(self, context: SimulationContext):
+        if self.save_only:
+            self.images = None
+
+    def onSimulationStep(self, context: SimulationStepContext):
+        # Create the plot.
+        fig, ax = self.visualiser(context)
+        if self.save_only:
+            fig.savefig(self.out_dir / f"{context.model.t}.{self.ext}")
+        else:
+            self.images.append((fig, ax))
+
+
+class MovieMaker(SimulationListener):
     """ Makes a movie from the simulation.
 
     It is recommended to set hard_stop = True in the model when using this
@@ -222,10 +336,10 @@ class SimulationMovieMaker(SimulationListener):
     fps: int
     max_frame: int
     duration: float
-    out_dir: str
+    out_dir: str | None = None
 
     # State variables tracked during simulations.
-    movie: Any = None
+    animation: Any = None
     _frames: list[np.ndarray] | None = None
     _frame_number: int | None = None
     _max_height: int | None = None
@@ -264,13 +378,13 @@ class SimulationMovieMaker(SimulationListener):
 
         # Compute other quantities using the values available.
         if max_frame is None:
+            self.duration = duration
             self.max_frame = round(fps * duration)
         else:
-            self.duration = self.max_frame / fps
+            self.duration = max_frame / fps
+            self.max_frame = max_frame
 
-    def make_frame(self, context: SimulationStepContext,
-                   fig: Figure,
-                   ax: Axes):
+    def make_frame(self, context: SimulationStepContext, fig: Figure, ax: Axes):
         """ Makes a frame based on the current context.
 
         Override this method to customise the video generated.
@@ -281,8 +395,8 @@ class SimulationMovieMaker(SimulationListener):
         """
         # Clear the axes before adding the next plot.
         ax.clear()
-        visualise(context.model.original_graph, context.model.height, max_height=self._max_height,
-                  fig=fig, ax=ax)
+        visualise_graph(context.model.original_graph, context.model.height,
+                        max_height=context.model.topple_limit, fig=fig, ax=ax)
         return mplfig_to_npimage(fig)
 
     def onSimulationStart(self, context: SimulationStartContext):
@@ -327,7 +441,7 @@ class SimulationMovieMaker(SimulationListener):
         if self.out_dir is not None:
             animation.write_videofile("./out/video.mp4", fps=20, loop=True)
 
-        return animation
+        self.animation = animation
 
     def onSimulationStep(self, context: SimulationStepContext):
         # Logic to determine whether the current frame should be included.
@@ -339,91 +453,33 @@ class SimulationMovieMaker(SimulationListener):
             self._frame_number += 1
 
 
-class StatisticsCollector(SimulationListener, ABC):
-    r""" A generic statistics collector suitable for a wide family of statistics.
-
-    This class implements
-      X_0 = f(X_{-padding}, \ldots )
-      X_t = f(X_0, \ldots, X_{lookback_count - 1})
-    """
-    _lookback: list[float] | None
-    _user_lookback_count: int | None
-    _current_lookback_count: int | None
-    _history: list[float]
-
-    def __init__(self, lookback_count: int | None = 0, padding: int = 0,
-                 track_history: bool = True):
-        """ Creates a statistics collector.
-
-        :param lookback_count: The number of past observations to cache,
-        required for computing recursively defined statistics like differences.
-        Setting this to None will cause the entire history to be recorded for
-        update, which may or may not be desirable.
-        :param padding
-        """
-        self._lookback = None
-        self._user_lookback_count = lookback_count
-        self._current_lookback_count = lookback_count
-
-    def record_entry(self, context: SimulationStepContext):
-        return (context.model.t, context.model.height.copy(), context.i,
-                context.is_topple)
-
-    @abstractmethod
-    def initialise(self):
-        """ Returns the first lookback_count values to start the computation.
-        """
-        pass
-
-    @abstractmethod
-    def update(self):
-        pass
-
-    @property
-    def lookback(self):
-        """ The lookback vector for accessing recent events. """
-        return self._lookback
-
-    def onSimulationStart(self, context: SimulationStartContext):
-        # Initialise the lookback and
-        self._lookback = []
-
-    def onSimulationStep(self, context: SimulationStepContext):
-        pass
-
-    def onSimulationEnd(self, context: SimulationContext):
-        self._lookback = None
-
-
-class MeanHeightCollector(SimulationListener):
-    """ A generic statistics collector.
-
-    Although you can compute quantities once all data is ready, the power of
-    this method lies in dynamic or online computation using the
-    onSimulationStep callback.
-    """
+class StatisticsCollector(SimulationListener, Generic[T]):
+    """ A generic statistics collector. """
+    calc: ContextTransformerType[T]
     store_history: bool
-    mean_height: float | None = None
-    mean_height_history: list[float] | None = None
+    value: float | None = None
+    value_history: list[float] | None = None
 
-    def __init__(self, store_history: bool = True):
+    def __init__(self, calc: ContextTransformerType[T],
+                 store_history: bool = True):
+        self.calc = calc
         self.store_history = store_history
 
     def onSimulationStart(self, context: SimulationStartContext):
         # Initialise the means.
-        self.mean_height = None
+        self.value = None
         if self.store_history:
-            self.mean_height_history = []
+            self.value_history = []
 
     def onSimulationStep(self, context: SimulationStepContext):
         # The mean height is simply the mean of all heights on the grid.
         if self.store_history:
-            self.mean_height = np.mean(context.model.height)
-            self.mean_height_history.append(self.mean_height)
+            self.value = self.calc(context)
+            self.value_history.append(self.value)
 
     def onSimulationEnd(self, context: SimulationContext):
         # Store the final grid mean height.
-        self.mean_height = np.mean(context.model.height)
+        self.value = self.calc(context)
 
 
 @dataclass
@@ -436,7 +492,7 @@ class Model(object):
     """
     # Fields that are final once initialised.
     graph: ig.Graph
-    boundary_vertices: dict[int, int] = field(default_factory=lambda x: {})
+    boundary_vertices: dict[int, int] = field(default_factory=lambda: {})
     topple_limit: int = 4
     t_lim: int = 1_000_000
     hard_stop: bool = False
@@ -448,7 +504,7 @@ class Model(object):
 
     # Fields that are indirectly initialised.
     original_graph: ig.Graph = field(init=False)
-    sink_indices: list[int] = field(init=False, default_factory=lambda x: [])
+    sink_indices: list[int] = field(init=False, default_factory=lambda: [])
 
     # The parameters that changes as the model evolves.
     t: int = field(default=0, init=False)
@@ -504,7 +560,7 @@ class Model(object):
 
         while self.t < t_lim:
             # Fetch the next vertex from the manager and add sand to it.
-            u = self.manager.chooseSimulationStep(SimulationContext(model))
+            u = self.manager.chooseSimulationStep(SimulationContext(self))
             self.height[u] += 1
             self.t += 1
 
@@ -570,13 +626,13 @@ class Model(object):
             for listener in self.listeners:
                 listener.onSimulationStep(step_context)
 
-    def visualise(self, *args, **kwargs):
+    def visualise_graph(self, *args, **kwargs):
         """ A shortcut to the visualise function. """
-        return visualise(self.original_graph, self.height, *args, **kwargs)
+        return visualise_graph(self.original_graph, self.height, *args, **kwargs)
 
-    def visualise_as_grid(self, n: int, m: int, *args, **kwargs):
+    def visualise_grid(self, n: int, m: int, *args, **kwargs):
         """ A shortcut to the visualise_as_grid function. """
-        return visualise_as_grid(n, m, self.height, *args, **kwargs)
+        return visualise_grid(n, m, self.height, *args, **kwargs)
 
 
 def make_grid_graph(m: int, n: int):
@@ -598,7 +654,7 @@ def make_grid_graph(m: int, n: int):
     return graph, boundary_vertices
 
 
-def visualise(
+def visualise_graph(
         graph: ig.Graph, height: list[int], max_height=None,
         fig: Figure = None, ax: Axes = None):
     """ Produce an image of the grid.
@@ -630,7 +686,7 @@ def visualise(
     return fig, ax
 
 
-def visualise_as_grid(
+def visualise_grid(
         m: int, n: int, height: list[int], max_height: int = None,
         fig: Figure = None, ax: Axes = None, xticks=None, yticks=None,
         labels=None, title=None):
@@ -691,31 +747,6 @@ def visualise_as_grid(
     return fig, ax
 
 
-def make_video(
-        graph: ig.Graph, history: list[list[int]], max_height=None):
-    """ Save the transition as a video. """
-    if max_height is None:
-        max_height = max(max(height) for height in history)
-
-    # Setup the video
-    frames_count = len(history)
-    duration = 30
-    fig, ax = plt.subplots()
-
-    def make_frame(t):
-        """ Helper function to make frames. """
-        # Clear the axes before adding the next plot.
-        ax.clear()
-        visualise(graph, history[round(t * (frames_count - 1) / duration)],
-                  max_height=max_height, fig=fig, ax=ax)
-        return mplfig_to_npimage(fig)
-
-    # creating animation
-    animation = VideoClip(make_frame=make_frame, duration=duration)
-    animation.write_videofile("./out/video.mp4", fps=20, loop=True)
-    # autoplay=True
-
-
 if __name__ == "__main__":
     # Testing.
     graph, boundary_vertices = make_grid_graph(10, 10)
@@ -725,5 +756,5 @@ if __name__ == "__main__":
         boundary_vertices=boundary_vertices
     )
     model.simulate()
-    fig, ax = model.visualise()
+    fig, ax = model.visualise_graph()
     fig.savefig("./out/1.jpg")
