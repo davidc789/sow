@@ -99,6 +99,18 @@ class ContextTransformer(object):
         else:
             return np.nan
 
+    @staticmethod
+    def drop_location(context: SimulationContext):
+        """ Gives the location of sand drop.
+
+        :param context: The simulation context.
+        :return: Vertex index at which sand is dropped onto.
+        """
+        if isinstance(context, SimulationStepContext):
+            return context.vertex
+        else:
+            return np.nan
+
 
 class SimulationListener(ABC):
     """ The base class for simulation listener callback objects.
@@ -299,6 +311,7 @@ class ImageMaker(SimulationListener):
         :param visualiser: A callback that generates the frames.
         """
         self.save_only = save_only
+        self.ext = ext
 
         if out_dir is not None:
             self.out_dir = Path(out_dir)
@@ -462,6 +475,11 @@ class StatisticsCollector(SimulationListener, Generic[T]):
 
     def __init__(self, calc: ContextTransformerType[T],
                  store_history: bool = True):
+        """ Constructs a statistics collector.
+
+        :param calc: Determine how the statistic is calculated.
+        :param store_history: Whether to store history.
+        """
         self.calc = calc
         self.store_history = store_history
 
@@ -747,14 +765,40 @@ def visualise_grid(
     return fig, ax
 
 
+def avalanche_loss(topple_occurrence: list[bool], topple_loss: list[float]):
+    """ Computes the amount of sand lost in an avalanche.
+
+    :param topple_occurrence: Flags for when topple occurred.
+    :param topple_loss: The loss when topple occurred.
+    """
+    t = 0
+    loss = []
+
+    while t < len(topple_occurrence):
+        current_loss = 0
+
+        # Advance to the first point toppling start to occur.
+        while t < len(topple_occurrence) and not topple_occurrence:
+            t += 1
+
+        # Sum all the loss for the toppling entries.
+        while t < len(topple_occurrence) and topple_occurrence:
+            current_loss += topple_loss[t]
+            t += 1
+
+        loss.append(current_loss)
+
+    return loss
+
+
 if __name__ == "__main__":
     # Testing.
-    graph, boundary_vertices = make_grid_graph(10, 10)
+    graph_, boundary_vertices_ = make_grid_graph(10, 10)
 
-    model = Model(
-        graph=graph,
-        boundary_vertices=boundary_vertices
+    model_ = Model(
+        graph=graph_,
+        boundary_vertices=boundary_vertices_
     )
-    model.simulate()
-    fig, ax = model.visualise_graph()
-    fig.savefig("./out/1.jpg")
+    model_.simulate()
+    fig_, ax_ = model_.visualise_graph()
+    fig_.savefig("./out/1.jpg")
