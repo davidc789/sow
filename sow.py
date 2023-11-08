@@ -25,21 +25,21 @@ T = TypeVar("T")
 @dataclass
 class SimulationContext(object):
     """ A generic simulation context. """
-    model: "Model"    # Reference to the model
+    model: "Model"     # Reference to the model
 
 
 @dataclass
 class SimulationStartContext(SimulationContext):
     """ Context to the start of the simulation. """
-    t_lim: int        # The end time of the simulation.
-    hard_stop: bool   # Whether to stop simulations regardless of topple status.
+    t_lim: int         # The end time of the simulation.
+    hard_stop: bool    # Whether to stop simulations regardless of topple status.
 
 
 @dataclass
 class SimulationStepContext(SimulationContext):
     """ Context to the current step of simulation. """
-    vertex: int            # The index of the cell selected.
-    is_topple: bool   # Whether the step is considered a topple step.
+    vertex: int        # The index of the cell selected.
+    is_topple: bool    # Whether the step is considered a topple step.
 
 
 # Type alias for the subsequent family of functions.
@@ -612,11 +612,10 @@ class Model(object):
                       "waiting a couple more milliseconds, set it to False.")
                 return
 
+            # Perform grid topple and spread the sand on cell (i, j).
             u = queue.popleft()
-            self.t += 1
-
-            # Perform reset and spread the sand on cell (i, j).
             self.height[u] -= self.topple_limit
+            self.t += 1
 
             # If this is not enough, adds the cell back into the queue.
             if self.height[u] >= self.topple_limit:
@@ -860,8 +859,8 @@ def avalanche_statistics(topple_occurrence: list[bool], topple_loss: list[float]
         # Sum all the loss for the toppling entries.
         while t < len(topple_occurrence) and topple_occurrence[t]:
             current_loss += topple_loss[t]
-            t += 1
             current_duration += 1
+            t += 1
 
         loss.append(current_loss)
         duration.append(current_duration)
