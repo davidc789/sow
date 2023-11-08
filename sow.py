@@ -658,16 +658,90 @@ def make_grid_graph(m: int, n: int):
 
     :param m: Number of rows in the grid.
     :param n: Number of columns in the grid.
-    :return: The grid graph along with the set of boundary vertices.
+    :return: The resulting graph along with the set of boundary vertices.
     """
-    edges = ([(i * m + j, i * m + j + 1) for j in range(n - 1)
-              for i in range(m)] + [(i * m + j, (i + 1) * m + j)
-                                    for j in range(n) for i in range(m - 1)])
+    # Construct the edges in the grid graph. We count row-wise, that is, from
+    # left to right in the first row, and proceed onto the next row once the row
+    # is exhausted.
+    horizontals = [(i * n + j, i * n + j + 1)
+                   for i in range(m) for j in range(n - 1)]
+    verticals = [(i * n + j, (i + 1) * n + j)
+                 for i in range(m - 1) for j in range(n)]
+    edges = horizontals + verticals
+
+    # Construct the graph. The grid should have a boundary multiplicity of 2 in
+    # the corners and 1 on the other parts of edges.
     graph = ig.Graph(edges)
     boundary_vertices = {
-        i * m + j: 1 for j in range(1, n - 2) for i in range(1, m - 2)
+        i * n + j: 1 for i in range(1, m - 1) for j in range(1, n - 1)
     } | {
-        i * m + j: 2 for j in [0, n - 1] for i in [0, m - 1]
+        i * n + j: 2 for i in [0, m - 1] for j in [0, n - 1]
+    }
+    return graph, boundary_vertices
+
+
+def make_cylinder_graph(m: int, n: int):
+    """ Makes a grid with the left and right boundaries connected.
+
+    The resulting graph is effectively isomorphic to a cylinder with openings on
+    the top and bottom.
+
+    :param m: Number of rows in the grid.
+    :param n: Number of columns in the grid.
+    :return: The resulting graph along with the set of boundary vertices.
+    """
+    # Construct the edges in the grid graph. We count row-wise, that is, from
+    # left to right in the first row, and proceed onto the next row once the row
+    # is exhausted.
+    # The horizontal connections should wrap around.
+    horizontals = [(i * n + j, i * n + (j + 1) % n)
+                   for i in range(m) for j in range(n)]
+    verticals = [(i * n + j, (i + 1) * n + j)
+                 for i in range(m - 1) for j in range(n)]
+    edges = horizontals + verticals
+
+    # Construct the graph. The grid should have a boundary multiplicity of 1 on
+    # the top and bottom edges.
+    graph = ig.Graph(edges)
+    boundary_vertices = {
+        i * n + j: 1 for i in [0, m - 1] for j in range(n - 1)
+    }
+    return graph, boundary_vertices
+
+
+def make_punctured_donut_graph(m: int, n: int):
+    """ Makes a grid with the left and right, top and bottom connected.
+
+    The resulting graph is effectively isomorphic to a donut with an extra hole.
+    Note that to make the central vertex well-defined, both m and n should be
+    odd values.
+
+    :param m: Number of rows in the grid.
+    :param n: Number of columns in the grid.
+    ::return: The resulting graph along with the set of boundary vertices.
+    """
+    if m % 2 == 0 or n % 2 == 0:
+        warnings.warn("Both m and n should be odd, or you may see the "
+                      "punctured hole not in the center.")
+
+    # Construct the edges in the grid graph. We count row-wise, that is, from
+    # left to right in the first row, and proceed onto the next row once the row
+    # is exhausted.
+    # Both horizontal and vertical connections should wrap around.
+    horizontals = [(i * n + j, i * n + (j + 1) % n)
+                   for i in range(m) for j in range(n)]
+    verticals = [(i * n + j, ((i + 1) % m) * n + j)
+                 for i in range(m) for j in range(n)]
+    edges = horizontals + verticals
+
+    # Construct the graph. Remove a center vertex and make its neighbours
+    # boundaries.
+    graph = ig.Graph(edges)
+    center_vertex = (n * m) // 2
+    graph.delete_vertices(center_vertex)
+    boundary_vertices = {
+        center_vertex + i * n + j: 1
+        for i, j in [(-1, 0), (1, 0), (0, -1), (0, 1)]
     }
     return graph, boundary_vertices
 
