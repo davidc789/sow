@@ -14,10 +14,11 @@ from matplotlib.axes import Axes
 import numpy as np
 import matplotlib.pyplot as plt
 import igraph as ig
+import statsmodels.api as sm
 
 from moviepy.editor import VideoClip
 from moviepy.video.io.bindings import mplfig_to_npimage
-from collections import deque
+from collections import deque, Counter
 
 T = TypeVar("T")
 
@@ -85,13 +86,13 @@ class ContextTransformer(object):
             return np.nan
 
     @staticmethod
-    def topple_loss(context: SimulationContext):
+    def sand_loss(context: SimulationContext):
         """ Gives the number of sand lost due to toppling over the boundary.
 
         :param context: The simulation context.
         :return: Number of sand lost during toppling.
         """
-        if isinstance(context, SimulationStepContext) and context.is_topple:
+        if isinstance(context, SimulationStepContext):
             if context.vertex in context.model.boundary_vertices:
                 return context.model.boundary_vertices[context.vertex]
             else:
@@ -295,12 +296,14 @@ class ImageMaker(SimulationListener):
     save_only: bool
     ext: str
     visualiser: Visualiser
+    subfig: bool
 
     # Internal states.
     images: list[tuple[Figure, Axes]] | None = None
 
     def __init__(self, out_dir: str | None = None, save_only: bool = False,
-                 ext: str = "jpg", visualiser: Visualiser | None = None):
+                 ext: str = "jpg", visualiser: Visualiser | None = None,
+                 subfig: bool = False):
         """ Creates an image maker.
 
         :param out_dir: Directory for output. If None the images will still
@@ -309,9 +312,11 @@ class ImageMaker(SimulationListener):
         requires out_dir to be specified
         :param ext: The filename extension for the images.
         :param visualiser: A callback that generates the frames.
+        :param subfig: Whether to generate all images in one figure.
         """
         self.save_only = save_only
         self.ext = ext
+        self.subfig = subfig
 
         if out_dir is not None:
             self.out_dir = Path(out_dir)
@@ -614,7 +619,7 @@ class Model(object):
 
             # Perform grid topple and spread the sand on cell (i, j).
             u = queue.popleft()
-            self.height[u] -= self.topple_limit
+            self.height[u] -= self.graph.degree(u)
             self.t += 1
 
             # If this is not enough, adds the cell back into the queue.
@@ -662,7 +667,7 @@ def make_grid_graph(m: int, n: int):
     # Construct the edges in the grid graph. We count row-wise, that is, from
     # left to right in the first row, and proceed onto the next row once the row
     # is exhausted.
-    horizontals = [(i * n + j, i * n + j + 1)
+    horizontals = [(i * n + j, i * n + (j + 1))
                    for i in range(m) for j in range(n - 1)]
     verticals = [(i * n + j, (i + 1) * n + j)
                  for i in range(m - 1) for j in range(n)]
@@ -675,6 +680,37 @@ def make_grid_graph(m: int, n: int):
         i * n + j: 1 for i in range(1, m - 1) for j in range(1, n - 1)
     } | {
         i * n + j: 2 for i in [0, m - 1] for j in [0, n - 1]
+    }
+    return graph, boundary_vertices
+
+
+def make_diagonal_grid_graph(m: int, n: int):
+    """ Makes a graph with a grid-like topology, including the four diagonals.
+
+    :param m: Number of rows in the grid.
+    :param n: Number of columns in the grid.
+    :return: The resulting graph along with the set of boundary vertices.
+    """
+    # Construct the edges in the grid graph. We count row-wise, that is, from
+    # left to right in the first row, and proceed onto the next row once the row
+    # is exhausted.
+    horizontals = [(i * n + j, i * n + (j + 1))
+                   for i in range(m) for j in range(n - 1)]
+    verticals = [(i * n + j, (i + 1) * n + j)
+                 for i in range(m - 1) for j in range(n)]
+    diagonal_1 = [(i * n + j, (i + 1) * n + (j + 1)) for i in range(m)
+                  for j in range(n) if 0 <= (i + 1) * n + (j + 1) < m * n]
+    diagonal_2 = [(i * n + j, (i + 1) * n + (j - 1)) for i in range(m)
+                  for j in range(n) if 0 <= (i + 1) * n + (j - 1) < m * n]
+    edges = horizontals + verticals + diagonal_1 + diagonal_2
+
+    # Construct the graph. The grid should have a boundary multiplicity of 5 in
+    # the corners and 3 in the other parts of edges.
+    graph = ig.Graph(edges)
+    boundary_vertices = {
+        i * n + j: 5 for i in range(1, m - 1) for j in range(1, n - 1)
+    } | {
+        i * n + j: 3 for i in [0, m - 1] for j in [0, n - 1]
     }
     return graph, boundary_vertices
 
@@ -708,6 +744,50 @@ def make_cylinder_graph(m: int, n: int):
     return graph, boundary_vertices
 
 
+def make_nary_tree(n: int, d: int):
+    """ Makes a complete n-ary tree with depth d.
+
+    :param n: The offspring multiplicity of the tree.
+    :param d: The depth of the tree.
+    :return: The resulting graph along with the set of boundary vertices.
+    """
+    internal_node_count = (n ** d - 1) // (n - 1)
+    total_node_count = (n ** (d + 1) - 1) // (n - 1)
+    edges = [
+        (u, n * u + 1 + i) for i in range(n) for u in range(internal_node_count)
+    ]
+
+    # Construct the graph. The graph should have a boundary multiplicity of 3.
+    graph = ig.Graph(edges)
+    boundary_vertices = {
+        u: 3 for u in range(internal_node_count, total_node_count)
+    }
+    return graph, boundary_vertices
+
+
+def make_interesting_tree(n: int, d: int):
+    """ Makes an interesting graph.
+
+    :param n: Number of
+    :param d: Depth of the sub-trees.
+    :return: The resulting graph along with the set of boundary vertices.
+    """
+    nary_tree, nary_tree_boundary_vertices = make_nary_tree(n, d)
+    nary_tree_edges = nary_tree.get_edgelist()
+    node_count = nary_tree.vcount()
+    edges = ([(u + w * node_count + 1, v + w * node_count + 1)
+              for u, v in nary_tree_edges for w in range(n + 1)]
+             + [(0, w * node_count + 1) for w in range(n + 1)])
+
+    # Construct the graph. The graph should have a boundary multiplicity of 3.
+    graph = ig.Graph(edges)
+    boundary_vertices = {
+        u + w * node_count + 1: nary_tree_boundary_vertices[u]
+        for u in nary_tree_boundary_vertices for w in range(n + 1)
+    }
+    return graph, boundary_vertices
+
+
 def make_punctured_donut_graph(m: int, n: int):
     """ Makes a grid with the left and right, top and bottom connected.
 
@@ -717,7 +797,7 @@ def make_punctured_donut_graph(m: int, n: int):
 
     :param m: Number of rows in the grid.
     :param n: Number of columns in the grid.
-    ::return: The resulting graph along with the set of boundary vertices.
+    :return: The resulting graph along with the set of boundary vertices.
     """
     if m % 2 == 0 or n % 2 == 0:
         warnings.warn("Both m and n should be odd, or you may see the "
@@ -838,34 +918,101 @@ def visualise_grid(
     return fig, ax
 
 
-def avalanche_statistics(topple_occurrence: list[bool], topple_loss: list[float]):
-    """ Computes the amount of sand lost in an avalanche.
+def avalanche_statistics(topple_occurrence: list[bool],
+                         topple_loss: list[int], drop_location: list[int]):
+    """ Computes a range of avalanche statistics.
+
+    The statistics computed are the duration, loss and area of the avalanche
 
     :param topple_occurrence: Flags for when topple occurred.
     :param topple_loss: The loss when topple occurred.
+    :param drop_location: Locations of toppling.
+    :return: The computed statistics.
     """
     t = 0
     loss = []
     duration = []
+    area = []
 
     while t < len(topple_occurrence):
         current_loss = 0
         current_duration = 0
+        vertex_covered = set()
 
         # Advance to the first point toppling start to occur.
-        while t < len(topple_occurrence) and not topple_occurrence[t]:
+        while (t < len(topple_occurrence) and
+               (topple_occurrence[t] == np.nan or not topple_occurrence[t])):
             t += 1
 
         # Sum all the loss for the toppling entries.
-        while t < len(topple_occurrence) and topple_occurrence[t]:
+        while (t < len(topple_occurrence) and
+               (topple_occurrence[t] != np.nan and topple_occurrence[t])):
             current_loss += topple_loss[t]
             current_duration += 1
+            vertex_covered.add(drop_location[t])
             t += 1
 
         loss.append(current_loss)
         duration.append(current_duration)
+        area.append(len(vertex_covered))
 
-    return duration, loss
+    return duration, loss, area
+
+
+def edf_transform(realisations: list[float]):
+    """ Computes the empirical distribution function from observations.
+
+    :param realisations: i.i.d. observations of an arbitrary distribution.
+    :return: The empirical distribution function given by x and y values.
+    """
+    counts = Counter(realisations)
+    pmf = sorted([(x, y / sum(counts.values())) for x, y in counts.items()])
+    edf_x, pmf_y = zip(*pmf)
+    edf_y = np.cumsum(pmf_y)
+    return edf_x, edf_y
+
+
+def fit_and_plot(x, y, summary: bool = True, plot: bool = True,
+                 bias: bool = True, fig: Figure = None, ax: Axes = None):
+    """ Fit a linear model on the input and display the result.
+
+    :param x: The x values to fit.
+    :param y: The y values to fit.
+    :param summary: Whether to generate a model summary.
+    :param plot: Whether to generate a plot.
+    :param bias: Whether to fit a model with a bias term.
+    :param fig: The matplotlib figure.
+    :param ax: The matplotlib axes.
+    """
+    # Adds a constant term to the input if a bias term is required.
+    if bias:
+        X = sm.add_constant(x)
+    else:
+        X = x
+
+    # Fit the linear model using ordinary least squares.
+    # Yep, I know this is weird, but the right order as per the package doc.
+    stats_model = sm.OLS(y, X)
+    result = stats_model.fit()
+
+    # Generate the summaries if requested.
+    if summary:
+        print(result.summary())
+
+    # Generate the plots if requested.
+    if plot:
+        fig: Figure
+        ax: Axes
+
+        if fig is None or ax is None:
+            fig, ax = plt.subplots()
+
+        ax.scatter(x, y)
+        ax.plot(x, result.fittedvalues, color='r', linestyle='-',
+                linewidth=1.5)
+        return result, fig, ax
+
+    return result
 
 
 if __name__ == "__main__":
