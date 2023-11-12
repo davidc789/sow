@@ -619,7 +619,7 @@ class Model(object):
 
             # Perform grid topple and spread the sand on cell (i, j).
             u = queue.popleft()
-            self.height[u] -= self.graph.degree(u)
+            self.height[u] -= 4
             self.t += 1
 
             # If this is not enough, adds the cell back into the queue.
@@ -952,67 +952,12 @@ def avalanche_statistics(topple_occurrence: list[bool],
             vertex_covered.add(drop_location[t])
             t += 1
 
-        loss.append(current_loss)
-        duration.append(current_duration)
-        area.append(len(vertex_covered))
+        if t < len(topple_occurrence):
+            loss.append(current_loss)
+            duration.append(current_duration)
+            area.append(len(vertex_covered))
 
     return duration, loss, area
-
-
-def edf_transform(realisations: list[float]):
-    """ Computes the empirical distribution function from observations.
-
-    :param realisations: i.i.d. observations of an arbitrary distribution.
-    :return: The empirical distribution function given by x and y values.
-    """
-    counts = Counter(realisations)
-    pmf = sorted([(x, y / sum(counts.values())) for x, y in counts.items()])
-    edf_x, pmf_y = zip(*pmf)
-    edf_y = np.cumsum(pmf_y)
-    return edf_x, edf_y
-
-
-def fit_and_plot(x, y, summary: bool = True, plot: bool = True,
-                 bias: bool = True, fig: Figure = None, ax: Axes = None):
-    """ Fit a linear model on the input and display the result.
-
-    :param x: The x values to fit.
-    :param y: The y values to fit.
-    :param summary: Whether to generate a model summary.
-    :param plot: Whether to generate a plot.
-    :param bias: Whether to fit a model with a bias term.
-    :param fig: The matplotlib figure.
-    :param ax: The matplotlib axes.
-    """
-    # Adds a constant term to the input if a bias term is required.
-    if bias:
-        X = sm.add_constant(x)
-    else:
-        X = x
-
-    # Fit the linear model using ordinary least squares.
-    # Yep, I know this is weird, but the right order as per the package doc.
-    stats_model = sm.OLS(y, X)
-    result = stats_model.fit()
-
-    # Generate the summaries if requested.
-    if summary:
-        print(result.summary())
-
-    # Generate the plots if requested.
-    if plot:
-        fig: Figure
-        ax: Axes
-
-        if fig is None or ax is None:
-            fig, ax = plt.subplots()
-
-        ax.scatter(x, y)
-        ax.plot(x, result.fittedvalues, color='r', linestyle='-',
-                linewidth=1.5)
-        return result, fig, ax
-
-    return result
 
 
 if __name__ == "__main__":
